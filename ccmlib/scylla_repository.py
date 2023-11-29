@@ -1,3 +1,4 @@
+import json
 import os
 import tarfile
 import tempfile
@@ -19,7 +20,7 @@ import packaging.version
 
 from ccmlib.common import (
     ArgumentError, CCMError, get_default_path, rmdirs, validate_install_dir, get_scylla_version, aws_bucket_ls,
-    DOWNLOAD_IN_PROGRESS_FILE, print_if_standalone, LockFile)
+    DOWNLOAD_IN_PROGRESS_FILE, print_if_standalone, LockFile, PACKAGE_SOURCE_FILE)
 from ccmlib.utils.download import download_file, download_version_from_s3, get_url_hash
 from ccmlib.utils.version import parse_version
 
@@ -212,6 +213,29 @@ def extract_major_version(version):
     return major_version
 
 
+def get_target_package_hash(packages: RelocatablePackages, s3_url: str) -> str:
+    """Defines URL for the target package based on input parameters."""
+    if not packages and not s3_url:
+        packages = RelocatablePackages(scylla_jmx_package=os.environ.get('SCYLLA_JMX_PACKAGE'),
+                                       scylla_tools_package=os.environ.get("SCYLLA_TOOLS_JAVA_PACKAGE") or
+                                                            os.environ.get("SCYLLA_JAVA_TOOLS_PACKAGE"),
+                                       scylla_package=os.environ.get('SCYLLA_CORE_PACKAGE'),
+                                       scylla_unified_package=os.environ.get('SCYLLA_UNIFIED_PACKAGE')
+                                       )
+
+        if not packages:
+            raise EnvironmentError("Not found environment parameters: 'SCYLLA_JMX_PACKAGE' and "
+                                   "('SCYLLA_TOOLS_JAVA_PACKAGE' or 'SCYLLA_JAVA_TOOLS_PACKAGE) and"
+                                   "'SCYLLA_CORE_PACKAGE'")
+    if packages:
+        if packages.scylla_unified_package:
+            return get_url_hash(packages.scylla_unified_package)
+        else:
+            return get_url_hash(packages.scylla_tools_package)
+    else:
+        return get_url_hash(s3_url)
+
+
 def setup(version, verbose=True, skip_downloads=False):
     """
     :param version:
@@ -242,9 +266,8 @@ def setup(version, verbose=True, skip_downloads=False):
     if type_n_version[0] == 'release':
         version = normalize_scylla_version(version)
         type_n_version = version.split(os.path.sep, 1)
-    version_dir = version_directory(version) if not skip_downloads else None
 
-    if len(type_n_version) == 2 and version_dir is None:
+    if len(type_n_version) == 2 and not skip_downloads:
         s3_version = type_n_version[1]
 
         if type_n_version[0] == 'release':
@@ -302,6 +325,23 @@ def setup(version, verbose=True, skip_downloads=False):
 
     if skip_downloads:
         return directory_name(version), packages
+
+    version_dir = directory_name(version)
+    source_json = os.path.join(version_dir, CORE_PACKAGE_DIR_NAME, PACKAGE_SOURCE_FILE)
+
+    if os.path.exists(source_json):
+        with open(source_json) as file:
+            sources = json.load(file)
+            source_hash = sources['hash']
+
+        target_hash = get_target_package_hash(packages, s3_url)
+
+        if target_hash == source_hash and target_hash is not None:
+            logging.info(f'No need to download {version} package as it already downloaded.')
+            return version_dir, packages
+
+    rmdirs(version_dir)
+    version_dir = None
 
     if version_dir is None:
         # Create version folder and add placeholder file to prevent parallel downloading from another test.
@@ -461,7 +501,7 @@ def download_version(version, url=None, verbose=False, target_dir=None, unified=
         else:
             raise ArgumentError(
                 f"unsupported url or file doesn't exist\n\turl={url}")
-
+        file_hash = get_url_hash(url)
         if verbose:
             print(f"Extracting {target} ({url}, {target_dir}) as version {version} ...")
         tar = tarfile.open(target)
@@ -490,10 +530,14 @@ def download_version(version, url=None, verbose=False, target_dir=None, unified=
         # add breadcrumb so we could list the origin of each part easily for debugging
         # for example listing all the version we have in ccm scylla-repository
         # find  ~/.ccm/scylla-repository/*/ -iname source.txt | xargs cat
-        source_breadcrumb_file = os.path.join(target_dir, 'source.txt')
+        source_breadcrumb_file = os.path.join(target_dir, PACKAGE_SOURCE_FILE)
         with open(source_breadcrumb_file, 'w') as f:
-            f.write(f"version={version}\n")
-            f.write(f"url={url}\n")
+            source_dict = {
+                'version': version,
+                'url': url,
+                'hash': file_hash
+            }
+            json.dump(source_dict, f)
 
         return package_version
     except urllib.error.URLError as e:

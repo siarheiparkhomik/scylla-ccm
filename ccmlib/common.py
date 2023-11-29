@@ -4,6 +4,7 @@
 
 import fnmatch
 import fcntl
+import json
 import os
 import platform
 import re
@@ -30,6 +31,7 @@ DSE_CASSANDRA_CONF_DIR = "resources/cassandra/conf"
 OPSCENTER_CONF_DIR = "conf"
 SCYLLA_CONF_DIR = "conf"
 SCYLLAMANAGER_DIR = "scylla-manager"
+PACKAGE_SOURCE_FILE = "source.json"
 
 
 CASSANDRA_CONF = "cassandra.yaml"
@@ -646,11 +648,9 @@ def scylla_extract_install_dir_and_mode(install_dir):
         scylla_mode = 'release'
         if os.path.exists(os.path.join(install_dir, 'scylla-core-package')):
             try:
-                f = open(os.path.join(install_dir, 'scylla-core-package', 'source.txt'), 'r')
-                for l in f.readlines():
-                    if l.startswith('url='):
-                        scylla_mode = scylla_extract_mode(l) or scylla_mode
-                f.close()
+                with open(os.path.join(install_dir, 'scylla-core-package', PACKAGE_SOURCE_FILE), 'r') as file:
+                    params = json.load(file)
+                    scylla_mode = scylla_extract_mode(params['url']) or scylla_mode
             except:
                 pass
     return install_dir, scylla_mode
